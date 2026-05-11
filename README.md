@@ -46,86 +46,125 @@ Program to implement the Random Forest Algorithm to predict daily temperature , 
 Developed by: ISHWARYA M
 RegisterNumber:  212225230107
 */
-# Random Forest Algorithm for Predicting Temperature, PM2.5 and Energy
-
-# Import required libraries
-import warnings
-warnings.filterwarnings('ignore')
-
 import pandas as pd
-from sklearn.model_selection import train_test_split
+import numpy as np
+import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 
-# Load dataset
-data = pd.read_csv("weather-station-eee-block_2024_07_13.csv")
+df = pd.read_csv("weather-station-eee-block_2024_07_13.csv")
+df.columns = df.columns.str.strip()
 
-# Display dataset
-print("Dataset Preview:")
-print(data.head())
 
-# Remove unwanted columns
-data = data.drop(['time', 'wind_direction', 'bat'], axis=1)
+df['time'] = pd.to_datetime(df['time'])
+df = df.sort_values('time').reset_index(drop=True)
 
-# Fill missing values if any
-data = data.fillna(data.mean(numeric_only=True))
 
-# Input Features
-X = data[['hum', 'co2', 'illumination', 'pressure',
-          'pm10', 'wind_direction_angle',
-          'wind_speed', 'wind_speed_level']]
+cols_to_fill = ['tem', 'pm2_5', 'tsr', 'hum', 'pressure', 'wind_speed', 'illumination', 'co2']
+for col in cols_to_fill:
+    if col in df.columns:
+        df[col] = df[col].interpolate(method='linear', limit=10)
 
-# Target Variables
-y = data[['tem', 'pm2_5', 'tsr']]
 
-# Split dataset into training and testing sets
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42
-)
+df['hour'] = df['time'].dt.hour
+df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
+df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
 
-# Create Random Forest Regressor model
-model = RandomForestRegressor(
-    n_estimators=100,
-    random_state=42
-)
 
-# Train the model
-model.fit(X_train, y_train)
+targets = ['tem', 'pm2_5', 'tsr']
+for t in targets:
+    df[f'{t}_lag1'] = df[t].shift(1)
+    df[f'{t}_lag2'] = df[t].shift(2)
 
-# Predict values
-y_pred = model.predict(X_test)
 
-# Model Evaluation
-print("\nModel Performance:")
+processed_df = df.dropna(subset=['tem_lag2', 'pm2_5_lag2', 'tsr_lag2', 'hum', 'pressure']).reset_index(drop=True)
+processed_df.to_csv("combined_processed_weather_data.csv", index=False)
 
-print("Mean Squared Error:")
-print(mean_squared_error(y_test, y_pred))
 
-print("\nR2 Score:")
-print(r2_score(y_test, y_pred))
+features = [
+    'hum', 'pressure', 'wind_speed', 'illumination', 'co2',
+    'hour_sin', 'hour_cos', 'tem_lag1', 'pm2_5_lag1', 'tsr_lag1'
+]
 
-# Predict for new sensor data
-new_data = [[
-    90,      # hum
-    300,     # co2
-    50000,   # illumination
-    1000,    # pressure
-    5,       # pm10
-    180,     # wind_direction_angle
-    1.5,     # wind_speed
-    1        # wind_speed_level
-]]
+print("--- Feature Engineering Summary ---")
+print(f"Original rows: {len(df)}")
+print(f"Processed rows (after lags/cleaning): {len(processed_df)}")
+print(f"Final high-performance feature set:",features)
 
-prediction = model.predict(new_data)
+split_idx = int(len(processed_df) * 0.8)
+train, test = processed_df.iloc[:split_idx], processed_df.iloc[split_idx:]
+X_train, X_test = train[features], test[features]
 
-print("\nPredicted Values:")
-print("Temperature:", prediction[0][0])
-print("PM2.5:", prediction[0][1])
-print("Energy (TSR):", prediction[0][2])
+models = {}
+results = {}
+
+target_meta = {
+    'tem': ('Temperature', '°C', 'red'),
+    'pm2_5': ('Pollution (PM2.5)', 'µg/m³', 'green'),
+    'tsr': ('Energy (Solar Radiation)', 'W/m²', 'orange')
+}
+
+for target in targets:
+    y_train, y_test = train[target], test[target]
+    
+
+    model = RandomForestRegressor(n_estimators=100, max_depth=12, random_state=42)
+    model.fit(X_train, y_train)
+    
+    preds = model.predict(X_test)
+    models[target] = model
+    
+    
+    results[target] = {
+        'r2': r2_score(y_test, preds),
+        'mae': mean_absolute_error(y_test, preds),
+        'preds': preds,
+        'actual': y_test.values
+    }
+
+
+fig, axes = plt.subplots(3, 2, figsize=(16, 18))
+
+for i, target in enumerate(targets):
+    label, unit, color = target_meta[target]
+    res = results[target]
+    
+   
+    axes[i, 0].plot(res['actual'][-150:], label='Actual', color='black', alpha=0.4, linewidth=2)
+    axes[i, 0].plot(res['preds'][-150:], label='Predicted', color=color, linestyle='--', linewidth=2)
+    axes[i, 0].set_title(f"{label}: Actual vs Predicted\n$R^2$: {res['r2']:.3f} | MAE: {res['mae']:.2f}")
+    axes[i, 0].set_ylabel(unit)
+    axes[i, 0].legend()
+    axes[i, 0].grid(True, alpha=0.3)
+    
+   
+    importances = pd.Series(models[target].feature_importances_, index=features).sort_values()
+    importances.plot(kind='barh', ax=axes[i, 1], color=color, alpha=0.7)
+    axes[i, 1].set_title(f"Key Drivers: {label}")
+
+plt.tight_layout()
+plt.show()
+
+
+last_row = processed_df.iloc[-1]
+latest_data = pd.DataFrame([{
+    'hum': last_row['hum'], 'pressure': last_row['pressure'], 'wind_speed': last_row['wind_speed'],
+    'illumination': last_row['illumination'], 'co2': last_row['co2'],
+    'hour_sin': last_row['hour_sin'], 'hour_cos': last_row['hour_cos'],
+    'tem_lag1': last_row['tem'], 'pm2_5_lag1': last_row['pm2_5'], 'tsr_lag1': last_row['tsr']
+}])
+
+print("\n--- NEXT STEP PREDICTIONS (Using Latest Data) ---")
+for target in targets:
+    pred_val = models[target].predict(latest_data)[0]
+    print(f"Predicted {target_meta[target][0]}: {pred_val:.2f} {target_meta[target][1]}")
 ```
 
 ## Output:
-<img width="827" height="728" alt="image" src="https://github.com/user-attachments/assets/3edc2f5c-72a8-4ef2-bac1-8cf5ec66f0d6" />
+<img width="1413" height="556" alt="image" src="https://github.com/user-attachments/assets/4423b947-ad28-42d5-be30-2fcfae0f66da" />
+<img width="1356" height="495" alt="image" src="https://github.com/user-attachments/assets/9519a38c-3a2b-4e95-b1a5-2edbaec1e3c4" />
+<img width="1372" height="586" alt="image" src="https://github.com/user-attachments/assets/aa187e6d-1850-471e-bae5-684545f8d52f" />
+
 
 
 ## Result:
